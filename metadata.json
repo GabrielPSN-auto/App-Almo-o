@@ -1,0 +1,5 @@
+{
+  "name": "Almoço Escola",
+  "description": "Aplicativo para registro de almoço escolar com exportação para Excel e envio de comprovantes por email.",
+  "requestFramePermissions": []
+}
