@@ -1,6 +1,6 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
+import { createClient } from "@supabase/supabase-js";
 import nodemailer from "nodemailer";
 
 const app = express();
@@ -8,23 +8,12 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize SQLite Database
-const db = new Database("escola.db");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    date TEXT NOT NULL,
-    observations TEXT,
-    email1 TEXT,
-    email2 TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Configure Nodemailer
-// We will use Ethereal Email for testing if no real credentials are provided
 let transporter: nodemailer.Transporter | null = null;
 
 async function initMailer() {
@@ -40,7 +29,6 @@ async function initMailer() {
         },
       });
     } else {
-      // Fallback to Ethereal for testing
       const testAccount = await nodemailer.createTestAccount();
       transporter = nodemailer.createTransport({
         host: "smtp.ethereal.email",
@@ -51,7 +39,7 @@ async function initMailer() {
           pass: testAccount.pass,
         },
       });
-      console.log("Using Ethereal Email for testing. Check console for preview URLs.");
+      console.log("Using Ethereal Email for testing.");
     }
   } catch (error) {
     console.error("Failed to initialize mailer:", error);
@@ -61,10 +49,16 @@ async function initMailer() {
 initMailer();
 
 // API Routes
-app.get("/api/entries", (req, res) => {
+app.get("/api/entries", async (req, res) => {
   try {
-    const entries = db.prepare("SELECT * FROM entries ORDER BY date DESC, created_at DESC").all();
-    res.json(entries);
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .order("date", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
   } catch (error) {
     console.error("Error fetching entries:", error);
     res.status(500).json({ error: "Failed to fetch entries" });
@@ -79,14 +73,15 @@ app.post("/api/entries", async (req, res) => {
   }
 
   try {
-    const stmt = db.prepare(`
-      INSERT INTO entries (name, date, observations, email1, email2)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    
-    const info = stmt.run(name, date, observations || "", email1 || "", email2 || "");
+    const { data, error } = await supabase
+      .from("entries")
+      .insert([
+        { name, date, observations: observations || "", email1: email1 || "", email2: email2 || "" }
+      ])
+      .select();
 
-    // Send emails if provided
+    if (error) throw error;
+
     const emailsToNotify = [email1, email2].filter(Boolean);
     
     if (emailsToNotify.length > 0 && transporter) {
@@ -98,21 +93,17 @@ app.post("/api/entries", async (req, res) => {
         html: `<p>Olá,</p><p>Segue o comprovante de almoço:</p><ul><li><strong>Nome:</strong> ${name}</li><li><strong>Data:</strong> ${date}</li><li><strong>Observações:</strong> ${observations || 'Nenhuma'}</li></ul><p>Obrigado!</p>`,
       };
 
-      const info = await transporter.sendMail(mailOptions);
-      console.log("Message sent: %s", info.messageId);
-      if (info.messageId.includes("ethereal")) {
-        console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info));
-      }
+      await transporter.sendMail(mailOptions);
     }
 
-    res.status(201).json({ id: info.lastInsertRowid, success: true });
+    res.status(201).json({ success: true, entry: data[0] });
   } catch (error) {
     console.error("Error saving entry:", error);
     res.status(500).json({ error: "Failed to save entry" });
   }
 });
 
-app.delete("/api/entries", (req, res) => {
+app.delete("/api/entries", async (req, res) => {
   const { startDate, endDate } = req.query;
 
   if (!startDate || !endDate) {
@@ -120,10 +111,14 @@ app.delete("/api/entries", (req, res) => {
   }
 
   try {
-    const stmt = db.prepare("DELETE FROM entries WHERE date >= ? AND date <= ?");
-    const info = stmt.run(startDate, endDate);
-    
-    res.json({ success: true, deletedCount: info.changes });
+    const { count, error } = await supabase
+      .from("entries")
+      .delete({ count: 'exact' })
+      .gte("date", startDate)
+      .lte("date", endDate);
+
+    if (error) throw error;
+    res.json({ success: true, deletedCount: count });
   } catch (error) {
     console.error("Error deleting entries:", error);
     res.status(500).json({ error: "Failed to delete entries" });
@@ -131,7 +126,6 @@ app.delete("/api/entries", (req, res) => {
 });
 
 async function startServer() {
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
